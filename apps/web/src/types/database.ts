@@ -14,16 +14,31 @@ export type Database = {
           id: string
           email: string
           created_at: string
+          role: string
+          verification_level: string
+          trust_score: number
+          verified_at: string | null
+          last_active: string
         }
         Insert: {
           id?: string
           email: string
           created_at?: string
+          role?: string
+          verification_level?: string
+          trust_score?: number
+          verified_at?: string | null
+          last_active?: string
         }
         Update: {
           id?: string
           email?: string
           created_at?: string
+          role?: string
+          verification_level?: string
+          trust_score?: number
+          verified_at?: string | null
+          last_active?: string
         }
         Relationships: []
       }

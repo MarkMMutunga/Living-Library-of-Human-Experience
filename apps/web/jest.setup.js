@@ -1,4 +1,7 @@
-import '@testing-library/jest-dom'
+import '@testing-library/jest-dom';
+
+// Make jest functions available globally
+global.jest = jest;
 
 // Mock next/router
 jest.mock('next/router', () => ({
