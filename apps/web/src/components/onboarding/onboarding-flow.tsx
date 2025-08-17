@@ -21,7 +21,12 @@ interface OnboardingStep {
   id: string
   title: string
   description: string
-  component: React.ComponentType<{ onNext: () => void; onPrev: () => void }>
+  component: React.ComponentType<{ 
+    onNext: () => void; 
+    onPrev: () => void;
+    userPreferences?: any;
+    setUserPreferences?: any;
+  }>
 }
 
 export function OnboardingFlow() {
@@ -180,8 +185,8 @@ function PrivacyStep({
 }: { 
   onNext: () => void
   onPrev: () => void
-  userPreferences: any
-  setUserPreferences: any
+  userPreferences?: any
+  setUserPreferences?: any
 }) {
   return (
     <div className="space-y-6">
@@ -202,7 +207,7 @@ function PrivacyStep({
           </div>
           <Switch
             checked={userPreferences.shareForResearch}
-            onCheckedChange={(checked) =>
+            onCheckedChange={(checked: boolean) =>
               setUserPreferences({ ...userPreferences, shareForResearch: checked })
             }
           />
@@ -217,7 +222,7 @@ function PrivacyStep({
           </div>
           <Switch
             checked={userPreferences.allowModelTraining}
-            onCheckedChange={(checked) =>
+            onCheckedChange={(checked: boolean) =>
               setUserPreferences({ ...userPreferences, allowModelTraining: checked })
             }
           />
@@ -232,7 +237,7 @@ function PrivacyStep({
           </div>
           <Switch
             checked={userPreferences.receiveStudyInvites}
-            onCheckedChange={(checked) =>
+            onCheckedChange={(checked: boolean) =>
               setUserPreferences({ ...userPreferences, receiveStudyInvites: checked })
             }
           />

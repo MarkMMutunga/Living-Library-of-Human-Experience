@@ -138,7 +138,7 @@ export default function InsightsVisualization({
                 cx="50%"
                 cy="50%"
                 labelLine={false}
-                label={({ theme, percent }) => `${theme} (${(percent * 100).toFixed(0)}%)`}
+                label={({ theme, percent }: any) => `${theme} (${((percent || 0) * 100).toFixed(0)}%)`}
                 outerRadius={120}
                 fill="#8884d8"
                 dataKey="frequency"
@@ -236,9 +236,9 @@ export default function InsightsVisualization({
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis type="number" domain={[0, 100]} />
               <YAxis dataKey="area" type="category" width={120} />
-              <Tooltip formatter={(value) => [`${value}%`, 'Growth Strength']} />
+              <Tooltip formatter={(value: any) => [`${value}%`, 'Growth Strength']} />
               <Bar dataKey="strength">
-                {growthData.map((entry, index) => (
+                {growthData.map((entry: any, index: number) => (
                   <Cell key={`cell-${index}`} fill={entry.color} />
                 ))}
               </Bar>

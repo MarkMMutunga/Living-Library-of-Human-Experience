@@ -134,8 +134,8 @@ export async function POST(request: NextRequest) {
 
     // Check if user has analytics permissions (admin/moderator)
     const { data: userProfile } = await supabase
-      .from('users')
-      .select('role, permissions')
+      .from('app_user')
+      .select('role, verification_level')
       .eq('id', user.id)
       .single();
 
@@ -274,8 +274,8 @@ async function generateAnalytics(
         originalityScore: 0.92 // uniqueness
       },
       growthTrends: {
-        weeklySubmissions: generateWeeklyData('submissions', 12),
-        qualityTrend: generateWeeklyData('quality', 12),
+        weeklySubmissions: generateWeeklySubmissions(12),
+        qualityTrend: generateQualityTrend(12),
         themeEvolution: generateThemeEvolution(12)
       }
     },
@@ -479,7 +479,7 @@ function generateDailyActiveUsers(days: number) {
   return data;
 }
 
-function generateWeeklyData(type: 'submissions' | 'quality', weeks: number) {
+function generateWeeklySubmissions(weeks: number): { week: string; count: number }[] {
   const data = [];
   const now = new Date();
   
@@ -487,20 +487,38 @@ function generateWeeklyData(type: 'submissions' | 'quality', weeks: number) {
     const date = new Date(now.getTime() - i * 7 * 24 * 60 * 60 * 1000);
     const weekStr = `Week of ${date.toISOString().split('T')[0]}`;
     
-    if (type === 'submissions') {
-      data.push({
-        week: weekStr,
-        count: Math.floor(Math.random() * 30) + 15
-      });
-    } else {
-      data.push({
-        week: weekStr,
-        avgScore: Math.round((Math.random() * 2 + 7) * 10) / 10
-      });
-    }
+    data.push({
+      week: weekStr,
+      count: Math.floor(Math.random() * 30) + 15
+    });
   }
   
   return data;
+}
+
+function generateQualityTrend(weeks: number): { week: string; avgScore: number }[] {
+  const data = [];
+  const now = new Date();
+  
+  for (let i = weeks - 1; i >= 0; i--) {
+    const date = new Date(now.getTime() - i * 7 * 24 * 60 * 60 * 1000);
+    const weekStr = `Week of ${date.toISOString().split('T')[0]}`;
+    
+    data.push({
+      week: weekStr,
+      avgScore: Math.round((Math.random() * 2 + 7) * 10) / 10
+    });
+  }
+  
+  return data;
+}
+
+function generateWeeklyData(type: 'submissions' | 'quality', weeks: number) {
+  if (type === 'submissions') {
+    return generateWeeklySubmissions(weeks);
+  } else {
+    return generateQualityTrend(weeks);
+  }
 }
 
 function generateThemeEvolution(weeks: number) {

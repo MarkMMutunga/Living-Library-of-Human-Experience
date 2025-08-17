@@ -1,4 +1,60 @@
-import '@testing-library/jest-dom';
+import '@testing-library/jest-dom'
+
+// Mock React
+global.React = require('react')
+
+// Mock Next.js globals
+Object.defineProperty(window, 'location', {
+  value: {
+    href: 'http://localhost:3000',
+    origin: 'http://localhost:3000',
+    pathname: '/',
+    search: '',
+    hash: '',
+    hostname: 'localhost',
+    port: '3000',
+    protocol: 'http:',
+  },
+  writable: true,
+})
+
+// Mock NextRequest more properly
+global.NextRequest = class NextRequest {
+  constructor(input, init) {
+    const url = typeof input === 'string' ? input : input.url
+    this._url = new URL(url, 'http://localhost:3000')
+    this.method = init?.method || 'GET'
+    this.headers = new Map(Object.entries(init?.headers || {}))
+    this.body = init?.body
+  }
+  
+  get url() {
+    return this._url.href
+  }
+  
+  get nextUrl() {
+    return this._url
+  }
+}
+
+global.NextResponse = class NextResponse {
+  constructor(body, init) {
+    this.body = body
+    this.status = init?.status || 200
+    this.statusText = init?.statusText || 'OK'
+    this.headers = new Map(Object.entries(init?.headers || {}))
+  }
+  
+  static json(body, init) {
+    return new NextResponse(JSON.stringify(body), {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...init?.headers
+      }
+    })
+  }
+};
 
 // Make jest functions available globally
 global.jest = jest;

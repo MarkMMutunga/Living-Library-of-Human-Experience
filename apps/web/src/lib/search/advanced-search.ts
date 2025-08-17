@@ -260,7 +260,7 @@ export class AdvancedSearchService {
   /**
    * Generate intelligent search suggestions
    */
-  private async generateSearchSuggestions(
+  async generateSearchSuggestions(
     query: string,
     filters: AdvancedSearchFilters,
     userId: string,
@@ -508,8 +508,8 @@ export class AdvancedSearchService {
     }, {} as Record<string, number>);
 
     return Object.entries(themeCount)
-      .filter(([, count]) => count >= 2)
-      .sort(([,a], [,b]) => b - a)
+      .filter(([, count]) => (count as number) >= 2)
+      .sort(([,a], [,b]) => (b as number) - (a as number))
       .slice(0, 3)
       .map(([theme]) => theme);
   }
@@ -522,8 +522,8 @@ export class AdvancedSearchService {
     }, {} as Record<string, number>);
 
     return Object.entries(emotionCount)
-      .filter(([, count]) => count >= 2)
-      .sort(([,a], [,b]) => b - a)
+      .filter(([, count]) => (count as number) >= 2)
+      .sort(([,a], [,b]) => (b as number) - (a as number))
       .slice(0, 3)
       .map(([emotion]) => emotion);
   }

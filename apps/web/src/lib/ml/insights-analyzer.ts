@@ -269,7 +269,7 @@ export class InsightsAnalyzer {
         if (!relationships.has(entity.name)) {
           relationships.set(entity.name, {
             entity: entity.name,
-            type: entity.type,
+            type: entity.type as 'person' | 'place' | 'concept' | 'activity',
             strength: 0,
             sentiment: 0,
             frequency: 0,
