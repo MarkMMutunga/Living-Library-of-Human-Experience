@@ -1,3 +1,14 @@
+/**
+ * Living Library of Human Experience - Create Fragment Page
+ * 
+ * Copyright (c) 2025 Mark Mikile Mutunga
+ * Author: Mark Mikile Mutunga <markmiki03@gmail.com>
+ * Phone: +254 707 678 643
+ * 
+ * This file is part of the Living Library of Human Experience platform.
+ * Licensed under proprietary license - see LICENSE file for details.
+ */
+
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { CreateFragmentForm } from '@/components/fragments/create-fragment-form'

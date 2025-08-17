@@ -1,3 +1,14 @@
+/**
+ * Living Library of Human Experience - Authentication API
+ * 
+ * Copyright (c) 2025 Mark Mikile Mutunga
+ * Author: Mark Mikile Mutunga <markmiki03@gmail.com>
+ * Phone: +254 707 678 643
+ * 
+ * This file is part of the Living Library of Human Experience platform.
+ * Licensed under proprietary license - see LICENSE file for details.
+ */
+
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { z } from 'zod'
