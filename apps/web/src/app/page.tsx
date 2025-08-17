@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation'
 import { FragmentsList } from '@/components/fragments/fragments-list'
 import { CreateFragmentButton } from '@/components/fragments/create-fragment-button'
 import { SearchBar } from '@/components/search/search-bar'
+import LandingPage from './landing/page'
 
 export default async function HomePage({
   searchParams,
@@ -16,7 +17,8 @@ export default async function HomePage({
   const { data: { user }, error } = await supabase.auth.getUser()
   
   if (error || !user) {
-    redirect('/auth/login')
+    // Show landing page for unauthenticated users
+    return <LandingPage />
   }
 
   return (
