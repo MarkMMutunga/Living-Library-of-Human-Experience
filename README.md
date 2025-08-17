@@ -524,7 +524,29 @@ npm run lint
 
 ## 📄 License
 
-This project is licensed under the MIT License.
+This project is currently under proprietary license. See the [LICENSE](LICENSE) file for details.
+
+For testing and evaluation permissions, contact Mark Mikile Mutunga at markmiki03@gmail.com.
+
+## 📞 Contact & Support
+
+**Author:** Mark Mikile Mutunga  
+**Email:** markmiki03@gmail.com  
+**Phone:** +254 707 678 643  
+
+For questions about:
+- Licensing and permissions
+- Collaboration opportunities  
+- Technical support
+- Feature requests
+- Bug reports
+
+## 📝 Copyright
+
+Copyright © 2025 Mark Mikile Mutunga. All rights reserved.
+
+This software and associated documentation are the proprietary property of Mark Mikile Mutunga. Testing and evaluation are permitted under the terms specified in the LICENSE file.
+
 ---
 
 Built by Mark Mikile Mutunga with ❤️ for preserving and connecting human experiences.

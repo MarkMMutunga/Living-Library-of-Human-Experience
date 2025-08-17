@@ -2,6 +2,13 @@
   "name": "llhe-monorepo",
   "version": "1.0.0",
   "description": "Living Library of Human Experiences - A privacy-first platform for human experience fragments",
+  "author": {
+    "name": "Mark Mikile Mutunga",
+    "email": "markmiki03@gmail.com",
+    "phone": "+254 707 678 643"
+  },
+  "license": "PROPRIETARY",
+  "copyright": "Copyright (c) 2025 Mark Mikile Mutunga. All rights reserved.",
   "private": true,
   "workspaces": [
     "apps/*",
