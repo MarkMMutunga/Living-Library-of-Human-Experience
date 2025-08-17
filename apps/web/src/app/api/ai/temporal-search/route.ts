@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { aiAnalysisService } from '@/lib/ai/openai-service';
+import { vectorSearchService } from '@/lib/ai/vector-search';
 
 interface TemporalSearchRequest {
   query?: string;
@@ -15,16 +17,15 @@ interface TemporalSearchRequest {
     ageRange?: { min: number; max: number };
     location?: string;
   };
-  userId?: string;
   sortBy?: 'chronological' | 'relevance' | 'emotional_intensity' | 'significance';
   limit?: number;
+  semanticSearch?: boolean;
 }
 
 interface TemporalFragment {
   id: string;
   title: string;
   content: string;
-  author: string;
   timeContext: {
     originalDate?: string;
     estimatedAge?: number;
@@ -43,51 +44,243 @@ interface TemporalFragment {
   metadata: {
     createdAt: string;
     lastModified: string;
-    engagementScore: number;
     temporalRelevance: number;
+    similarity?: number;
   };
-}
-
-interface TimelineView {
-  totalFragments: number;
-  timeSpan: {
-    earliest: string;
-    latest: string;
-    duration: string;
-  };
-  periods: {
-    name: string;
-    startDate: string;
-    endDate: string;
-    fragmentCount: number;
-    keyThemes: string[];
-    emotionalTone: string;
-  }[];
-  fragments: TemporalFragment[];
 }
 
 export async function POST(request: NextRequest) {
   try {
     const supabase = createClient();
     const body: TemporalSearchRequest = await request.json();
-    
+    const { 
+      query, 
+      timeFrame, 
+      filters, 
+      sortBy = 'relevance', 
+      limit = 10,
+      semanticSearch = true
+    } = body;
+
     // Get user session
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const searchResults = await performTemporalSearch(supabase, user.id, body);
-    const timelineView = await generateTimelineView(searchResults, body);
+    let fragments: any[] = [];
+    let searchMethod = 'database';
+
+    // If we have a text query and semantic search is enabled, use vector search
+    if (query && semanticSearch) {
+      try {
+        const semanticResults = await vectorSearchService.semanticSearch(
+          query,
+          {}, // empty filters for now
+          limit * 2 // Get more results to filter by other criteria
+        );
+
+        fragments = semanticResults.map((result: any) => ({
+          id: result.fragment_id,
+          title: result.title || 'Untitled',
+          body: result.content,
+          system_themes: result.system_themes || [],
+          system_emotions: result.system_emotions || [],
+          created_at: result.created_at,
+          updated_at: result.updated_at,
+          similarity: result.similarity,
+          user_id: result.user_id
+        }));
+
+        searchMethod = 'semantic';
+      } catch (vectorError) {
+        console.error('Semantic search failed, falling back to database search:', vectorError);
+      }
+    }
+
+    // If semantic search didn't work or wasn't requested, use database search
+    if (fragments.length === 0) {
+      let dbQuery = supabase
+        .from('fragment')
+        .select(`
+          id,
+          title,
+          body,
+          system_themes,
+          system_emotions,
+          created_at,
+          updated_at,
+          user_id
+        `)
+        .eq('user_id', user.id);
+
+      // Apply text search if query provided
+      if (query) {
+        dbQuery = dbQuery.or(`title.ilike.%${query}%,body.ilike.%${query}%`);
+      }
+
+      // Apply theme filters
+      if (filters?.themes?.length) {
+        dbQuery = dbQuery.overlaps('system_themes', filters.themes);
+      }
+
+      // Apply emotion filters
+      if (filters?.emotions?.length) {
+        dbQuery = dbQuery.overlaps('system_emotions', filters.emotions);
+      }
+
+      // Apply date range filters
+      if (timeFrame?.start) {
+        dbQuery = dbQuery.gte('created_at', timeFrame.start);
+      }
+      if (timeFrame?.end) {
+        dbQuery = dbQuery.lte('created_at', timeFrame.end);
+      }
+
+      // Order results
+      switch (sortBy) {
+        case 'chronological':
+          dbQuery = dbQuery.order('created_at', { ascending: false });
+          break;
+        case 'relevance':
+        default:
+          dbQuery = dbQuery.order('updated_at', { ascending: false });
+          break;
+      }
+
+      const { data: dbFragments, error: dbError } = await dbQuery.limit(limit * 2);
+
+      if (dbError) {
+        console.error('Database search error:', dbError);
+        return NextResponse.json({ error: 'Search failed' }, { status: 500 });
+      }
+
+      fragments = dbFragments || [];
+    }
+
+    // Filter results to user's content only
+    fragments = fragments.filter(f => f.user_id === user.id);
+
+    // Apply additional AI-based filtering and analysis
+    let processedFragments: TemporalFragment[] = [];
+
+    if (fragments.length > 0) {
+      // Process each fragment for temporal context
+      processedFragments = await Promise.all(
+        fragments.slice(0, limit).map(async (fragment: any) => {
+          let timeContext = {
+            lifePeriod: 'unknown',
+            significance: 5.0,
+            seasonality: undefined as string | undefined,
+            estimatedAge: undefined as number | undefined,
+            originalDate: undefined as string | undefined
+          };
+
+          // Try to extract temporal context using AI if content is substantial
+          if (fragment.body && fragment.body.length > 100) {
+            try {
+              const temporalAnalysis = await aiAnalysisService.analyzeStoryContent(
+                fragment.body,
+                fragment.title
+              );
+
+              // Map AI analysis to temporal context
+              timeContext = {
+                lifePeriod: extractLifePeriod(temporalAnalysis.summary),
+                significance: Math.random() * 4 + 6, // 6-10 range for now
+                seasonality: extractSeasonality(fragment.body),
+                estimatedAge: extractAge(fragment.body),
+                originalDate: fragment.created_at
+              };
+            } catch (aiError) {
+              console.error('AI temporal analysis failed:', aiError);
+              // Use fallback analysis
+              timeContext = {
+                lifePeriod: inferLifePeriodFromThemes(fragment.system_themes || []),
+                significance: 5.0,
+                seasonality: extractSeasonality(fragment.body),
+                estimatedAge: undefined,
+                originalDate: fragment.created_at
+              };
+            }
+          }
+
+          return {
+            id: fragment.id,
+            title: fragment.title || 'Untitled',
+            content: fragment.body?.substring(0, 300) + '...' || '',
+            timeContext,
+            themes: fragment.system_themes || [],
+            emotions: fragment.system_emotions || [],
+            location: extractLocation(fragment.body),
+            connections: {
+              relatedFragments: [], // Would need additional analysis
+              timelinePosition: calculateTimelinePosition(fragment.created_at),
+              narrativeArc: 'personal_experience'
+            },
+            metadata: {
+              createdAt: fragment.created_at,
+              lastModified: fragment.updated_at,
+              temporalRelevance: calculateTemporalRelevance(timeContext, timeFrame),
+              similarity: fragment.similarity
+            }
+          };
+        })
+      );
+
+      // Sort based on specified criteria
+      processedFragments = sortTemporalFragments(processedFragments, sortBy);
+    }
+
+    // Generate AI insights about the temporal patterns
+    let temporalInsights;
+    if (processedFragments.length > 0) {
+      try {
+        const patterns = analyzeTemporalPatterns(processedFragments);
+        temporalInsights = {
+          patterns,
+          summary: generateTemporalSummary(processedFragments, query),
+          timeline: buildTimeline(processedFragments),
+          themes: extractCommonThemes(processedFragments),
+          emotionalJourney: analyzeEmotionalJourney(processedFragments)
+        };
+      } catch (insightError) {
+        console.error('Failed to generate temporal insights:', insightError);
+        temporalInsights = {
+          patterns: ['Personal narrative progression'],
+          summary: `Found ${processedFragments.length} relevant memories`,
+          timeline: [],
+          themes: [],
+          emotionalJourney: 'Complex emotional progression'
+        };
+      }
+    }
 
     return NextResponse.json({
-      results: searchResults,
-      timeline: timelineView,
-      searchParams: body,
+      fragments: processedFragments,
+      searchMetadata: {
+        query,
+        method: searchMethod,
+        totalResults: processedFragments.length,
+        timeFrame,
+        filters,
+        sortBy
+      },
+      temporalInsights,
       generatedAt: new Date().toISOString()
     });
   } catch (error) {
     console.error('Error in temporal search:', error);
+    
+    if (error instanceof Error) {
+      if (error.message.includes('OpenAI')) {
+        return NextResponse.json({ 
+          error: 'AI service temporarily unavailable',
+          details: 'Please try again later'
+        }, { status: 503 });
+      }
+    }
+    
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -96,27 +289,68 @@ export async function GET(request: NextRequest) {
   try {
     const supabase = createClient();
     const { searchParams } = new URL(request.url);
-    
+
     // Get user session
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const userId = searchParams.get('userId') || user.id;
-    const era = searchParams.get('era') as 'childhood' | 'youth' | 'adulthood' | 'recent';
-    const period = searchParams.get('period') as 'decade' | 'year' | 'season' | 'month';
+    // Get user's temporal patterns and timeline overview
+    const { data: fragments, error: fragmentsError } = await supabase
+      .from('fragment')
+      .select(`
+        id,
+        title,
+        body,
+        system_themes,
+        system_emotions,
+        created_at,
+        updated_at
+      `)
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
 
-    // Generate user's complete temporal narrative
-    const userTimeline = await generateUserTimeline(supabase, userId);
-    const eraOverview = era ? await getEraOverview(supabase, userId, era) : null;
-    const periodicBreakdown = period ? await getPeriodicBreakdown(supabase, userId, period) : null;
+    if (fragmentsError || !fragments?.length) {
+      return NextResponse.json({
+        timeline: [],
+        patterns: [],
+        message: 'No fragments found for temporal analysis'
+      });
+    }
+
+    // Analyze temporal patterns across all user content
+    const timelineData = fragments.map(fragment => ({
+      date: fragment.created_at,
+      title: fragment.title,
+      themes: fragment.system_themes || [],
+      emotions: fragment.system_emotions || []
+    }));
+
+    const temporalPatterns = {
+      totalMemories: fragments.length,
+      timeSpan: {
+        earliest: fragments[fragments.length - 1]?.created_at,
+        latest: fragments[0]?.created_at
+      },
+      themesOverTime: analyzeThemesOverTime(fragments),
+      emotionalProgression: analyzeEmotionalProgression(fragments),
+      significantPeriods: identifySignificantPeriods(fragments),
+      writingPatterns: analyzeWritingPatterns(fragments)
+    };
 
     return NextResponse.json({
-      timeline: userTimeline,
-      eraOverview,
-      periodicBreakdown,
-      insights: await generateTemporalInsights(supabase, userId),
+      timeline: timelineData.slice(0, 20), // Recent 20 for overview
+      patterns: temporalPatterns,
+      suggestions: {
+        exploreEras: ['childhood', 'youth', 'recent'],
+        searchPrompts: [
+          'Memories about family',
+          'Times of change',
+          'Moments of joy',
+          'Learning experiences'
+        ]
+      },
       generatedAt: new Date().toISOString()
     });
   } catch (error) {
@@ -125,366 +359,236 @@ export async function GET(request: NextRequest) {
   }
 }
 
-async function performTemporalSearch(
-  supabase: any,
-  userId: string,
-  searchParams: TemporalSearchRequest
-): Promise<TemporalFragment[]> {
-  // Mock implementation - in production, this would query the database with temporal indexing
-  const mockFragments: TemporalFragment[] = [
-    {
-      id: 'temp_001',
-      title: 'First Day of School',
-      content: 'I remember walking into that big classroom, my small hand clutching my mother\'s...',
-      author: 'Current User',
-      timeContext: {
-        originalDate: '1995-09-05',
-        estimatedAge: 6,
-        lifePeriod: 'childhood',
-        seasonality: 'autumn',
-        significance: 8.5
-      },
-      themes: ['Education', 'Growing Up', 'Independence'],
-      emotions: ['Nervousness', 'Excitement', 'Pride'],
-      location: 'Elementary School, Springfield',
-      connections: {
-        relatedFragments: ['temp_002', 'temp_015'],
-        timelinePosition: 0.1,
-        narrativeArc: 'educational_journey'
-      },
-      metadata: {
-        createdAt: '2025-08-15T10:30:00Z',
-        lastModified: '2025-08-15T10:30:00Z',
-        engagementScore: 4.2,
-        temporalRelevance: 0.92
-      }
-    },
-    {
-      id: 'temp_002',
-      title: 'High School Graduation',
-      content: 'Throwing our caps in the air, we thought we were ready for anything...',
-      author: 'Current User',
-      timeContext: {
-        originalDate: '2007-06-15',
-        estimatedAge: 18,
-        lifePeriod: 'youth',
-        seasonality: 'summer',
-        significance: 9.2
-      },
-      themes: ['Achievement', 'Transition', 'Friendship'],
-      emotions: ['Joy', 'Anticipation', 'Nostalgia'],
-      location: 'Springfield High School',
-      connections: {
-        relatedFragments: ['temp_001', 'temp_003'],
-        timelinePosition: 0.3,
-        narrativeArc: 'educational_journey'
-      },
-      metadata: {
-        createdAt: '2025-08-14T15:45:00Z',
-        lastModified: '2025-08-14T15:45:00Z',
-        engagementScore: 4.8,
-        temporalRelevance: 0.95
-      }
-    },
-    {
-      id: 'temp_003',
-      title: 'My First Job Interview',
-      content: 'Nervous sweats and a too-tight tie, but I was determined to make my mark...',
-      author: 'Current User',
-      timeContext: {
-        originalDate: '2011-03-22',
-        estimatedAge: 22,
-        lifePeriod: 'early_adulthood',
-        seasonality: 'spring',
-        significance: 7.8
-      },
-      themes: ['Career', 'Ambition', 'Growth'],
-      emotions: ['Anxiety', 'Determination', 'Hope'],
-      location: 'Downtown Office Building',
-      connections: {
-        relatedFragments: ['temp_002', 'temp_004'],
-        timelinePosition: 0.45,
-        narrativeArc: 'professional_journey'
-      },
-      metadata: {
-        createdAt: '2025-08-13T09:20:00Z',
-        lastModified: '2025-08-13T09:20:00Z',
-        engagementScore: 4.1,
-        temporalRelevance: 0.87
-      }
-    },
-    {
-      id: 'temp_004',
-      title: 'Becoming a Parent',
-      content: 'Holding my daughter for the first time, everything else faded away...',
-      author: 'Current User',
-      timeContext: {
-        originalDate: '2018-11-28',
-        estimatedAge: 29,
-        lifePeriod: 'adulthood',
-        seasonality: 'late_autumn',
-        significance: 10.0
-      },
-      themes: ['Family', 'Love', 'Responsibility'],
-      emotions: ['Love', 'Wonder', 'Overwhelm'],
-      location: 'St. Mary\'s Hospital',
-      connections: {
-        relatedFragments: ['temp_003', 'temp_005'],
-        timelinePosition: 0.7,
-        narrativeArc: 'family_journey'
-      },
-      metadata: {
-        createdAt: '2025-08-12T14:30:00Z',
-        lastModified: '2025-08-12T14:30:00Z',
-        engagementScore: 4.9,
-        temporalRelevance: 0.98
-      }
-    },
-    {
-      id: 'temp_005',
-      title: 'Learning to Code During Pandemic',
-      content: 'With the world on pause, I finally had time to chase that dream...',
-      author: 'Current User',
-      timeContext: {
-        originalDate: '2020-05-15',
-        estimatedAge: 31,
-        lifePeriod: 'adulthood',
-        seasonality: 'spring',
-        significance: 8.7
-      },
-      themes: ['Learning', 'Adaptation', 'Technology'],
-      emotions: ['Curiosity', 'Frustration', 'Achievement'],
-      location: 'Home Office',
-      connections: {
-        relatedFragments: ['temp_004', 'temp_006'],
-        timelinePosition: 0.8,
-        narrativeArc: 'professional_journey'
-      },
-      metadata: {
-        createdAt: '2025-08-11T16:20:00Z',
-        lastModified: '2025-08-11T16:20:00Z',
-        engagementScore: 4.4,
-        temporalRelevance: 0.91
-      }
+// Helper functions
+function extractLifePeriod(summary: string): string {
+  const keywords = {
+    childhood: ['child', 'kid', 'young', 'school', 'parent', 'home'],
+    youth: ['teen', 'adolescent', 'high school', 'college', 'university'],
+    adulthood: ['work', 'career', 'marriage', 'family', 'responsibility'],
+    recent: ['recent', 'lately', 'now', 'current', 'today']
+  };
+
+  for (const [period, words] of Object.entries(keywords)) {
+    if (words.some(word => summary.toLowerCase().includes(word))) {
+      return period;
     }
+  }
+  return 'unknown';
+}
+
+function inferLifePeriodFromThemes(themes: string[]): string {
+  const themeMapping = {
+    childhood: ['family', 'school', 'innocence', 'play'],
+    youth: ['identity', 'independence', 'exploration', 'education'],
+    adulthood: ['career', 'relationships', 'responsibility', 'achievement'],
+    recent: ['reflection', 'wisdom', 'legacy', 'mentoring']
+  };
+
+  for (const [period, periodThemes] of Object.entries(themeMapping)) {
+    if (themes.some(theme => 
+      periodThemes.some(pt => theme.toLowerCase().includes(pt))
+    )) {
+      return period;
+    }
+  }
+  return 'unknown';
+}
+
+function extractSeasonality(content: string): string | undefined {
+  const seasons = ['spring', 'summer', 'fall', 'autumn', 'winter'];
+  const seasonWords = {
+    spring: ['spring', 'bloom', 'fresh', 'new'],
+    summer: ['summer', 'hot', 'vacation', 'beach'],
+    fall: ['fall', 'autumn', 'leaves', 'harvest'],
+    winter: ['winter', 'cold', 'snow', 'holiday']
+  };
+
+  for (const [season, words] of Object.entries(seasonWords)) {
+    if (words.some(word => content.toLowerCase().includes(word))) {
+      return season;
+    }
+  }
+  return undefined;
+}
+
+function extractAge(content: string): number | undefined {
+  const ageMatch = content.match(/(?:was|am|turned)\s+(\d{1,2})\s+(?:years?\s+old)?/i);
+  return ageMatch ? parseInt(ageMatch[1]) : undefined;
+}
+
+function extractLocation(content: string): string | undefined {
+  // Simple location extraction - could be enhanced with NLP
+  const locationPatterns = [
+    /in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g,
+    /at\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g
   ];
 
-  // Filter based on search parameters
-  let filteredFragments = mockFragments;
-
-  if (searchParams.timeFrame?.era) {
-    filteredFragments = filteredFragments.filter(f => 
-      f.timeContext.lifePeriod.includes(searchParams.timeFrame!.era!)
-    );
-  }
-
-  if (searchParams.timeFrame?.start || searchParams.timeFrame?.end) {
-    filteredFragments = filteredFragments.filter(f => {
-      if (!f.timeContext.originalDate) return false;
-      const fragmentDate = new Date(f.timeContext.originalDate);
-      const start = searchParams.timeFrame?.start ? new Date(searchParams.timeFrame.start) : null;
-      const end = searchParams.timeFrame?.end ? new Date(searchParams.timeFrame.end) : null;
-      
-      if (start && fragmentDate < start) return false;
-      if (end && fragmentDate > end) return false;
-      return true;
-    });
-  }
-
-  if (searchParams.filters?.themes) {
-    filteredFragments = filteredFragments.filter(f =>
-      f.themes.some(theme => searchParams.filters!.themes!.includes(theme))
-    );
-  }
-
-  if (searchParams.filters?.emotions) {
-    filteredFragments = filteredFragments.filter(f =>
-      f.emotions.some(emotion => searchParams.filters!.emotions!.includes(emotion))
-    );
-  }
-
-  // Sort results
-  const sortBy = searchParams.sortBy || 'chronological';
-  filteredFragments.sort((a, b) => {
-    switch (sortBy) {
-      case 'chronological':
-        return new Date(a.timeContext.originalDate || '').getTime() - 
-               new Date(b.timeContext.originalDate || '').getTime();
-      case 'relevance':
-        return b.metadata.temporalRelevance - a.metadata.temporalRelevance;
-      case 'emotional_intensity':
-        return b.timeContext.significance - a.timeContext.significance;
-      case 'significance':
-        return b.timeContext.significance - a.timeContext.significance;
-      default:
-        return 0;
+  for (const pattern of locationPatterns) {
+    const matches = content.match(pattern);
+    if (matches && matches.length > 0) {
+      return matches[0].replace(/^(in|at)\s+/, '');
     }
-  });
-
-  return filteredFragments.slice(0, searchParams.limit || 50);
+  }
+  return undefined;
 }
 
-async function generateTimelineView(
-  fragments: TemporalFragment[],
-  searchParams: TemporalSearchRequest
-): Promise<TimelineView> {
-  if (fragments.length === 0) {
-    return {
-      totalFragments: 0,
-      timeSpan: { earliest: '', latest: '', duration: '' },
-      periods: [],
-      fragments: []
-    };
+function calculateTimelinePosition(createdAt: string): number {
+  // Simple calculation based on creation date
+  const date = new Date(createdAt);
+  const now = new Date();
+  const daysDiff = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
+  return Math.max(0, 100 - (daysDiff / 365) * 10); // Rough timeline position
+}
+
+function calculateTemporalRelevance(timeContext: any, timeFrame: any): number {
+  if (!timeFrame) return 0.5;
+  
+  // Simple relevance calculation based on time context match
+  let relevance = 0.5;
+  
+  if (timeFrame.era && timeContext.lifePeriod === timeFrame.era) {
+    relevance += 0.3;
   }
+  
+  if (timeFrame.start && timeContext.originalDate) {
+    const targetDate = new Date(timeFrame.start);
+    const fragmentDate = new Date(timeContext.originalDate);
+    const daysDiff = Math.abs(targetDate.getTime() - fragmentDate.getTime()) / (1000 * 60 * 60 * 24);
+    if (daysDiff < 365) relevance += 0.2;
+  }
+  
+  return Math.min(1, relevance);
+}
 
-  const dates = fragments
-    .map(f => f.timeContext.originalDate)
-    .filter(Boolean)
-    .map(d => new Date(d!))
-    .sort((a, b) => a.getTime() - b.getTime());
+function sortTemporalFragments(fragments: TemporalFragment[], sortBy: string): TemporalFragment[] {
+  switch (sortBy) {
+    case 'chronological':
+      return fragments.sort((a, b) => 
+        new Date(b.metadata.createdAt).getTime() - new Date(a.metadata.createdAt).getTime()
+      );
+    case 'emotional_intensity':
+      return fragments.sort((a, b) => b.timeContext.significance - a.timeContext.significance);
+    case 'significance':
+      return fragments.sort((a, b) => b.timeContext.significance - a.timeContext.significance);
+    case 'relevance':
+    default:
+      return fragments.sort((a, b) => 
+        (b.metadata.similarity || b.metadata.temporalRelevance) - 
+        (a.metadata.similarity || a.metadata.temporalRelevance)
+      );
+  }
+}
 
-  const earliest = dates[0];
-  const latest = dates[dates.length - 1];
-  const durationYears = (latest.getTime() - earliest.getTime()) / (1000 * 60 * 60 * 24 * 365.25);
+function analyzeTemporalPatterns(fragments: TemporalFragment[]): string[] {
+  const patterns = [];
+  
+  const lifePeriods = fragments.map(f => f.timeContext.lifePeriod);
+  const periodCounts = lifePeriods.reduce((acc, period) => {
+    acc[period] = (acc[period] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  
+  const dominantPeriod = Object.entries(periodCounts)
+    .sort(([,a], [,b]) => b - a)[0]?.[0];
+  
+  if (dominantPeriod) {
+    patterns.push(`Most memories from ${dominantPeriod} period`);
+  }
+  
+  const seasons = fragments
+    .map(f => f.timeContext.seasonality)
+    .filter(Boolean);
+  
+  if (seasons.length > 0) {
+    patterns.push(`Seasonal patterns detected`);
+  }
+  
+  return patterns;
+}
 
-  // Group by periods
-  const periods = groupFragmentsByPeriod(fragments, searchParams.timeFrame?.period || 'decade');
+function generateTemporalSummary(fragments: TemporalFragment[], query?: string): string {
+  const count = fragments.length;
+  const periods = [...new Set(fragments.map(f => f.timeContext.lifePeriod))];
+  
+  if (query) {
+    return `Found ${count} memories related to "${query}" across ${periods.length} life periods`;
+  }
+  
+  return `Discovered ${count} memories spanning ${periods.length} different life periods`;
+}
 
+function buildTimeline(fragments: TemporalFragment[]): any[] {
+  return fragments
+    .filter(f => f.metadata.createdAt)
+    .map(f => ({
+      date: f.metadata.createdAt,
+      title: f.title,
+      period: f.timeContext.lifePeriod,
+      significance: f.timeContext.significance
+    }))
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+}
+
+function extractCommonThemes(fragments: TemporalFragment[]): string[] {
+  const allThemes = fragments.flatMap(f => f.themes);
+  const themeCount = allThemes.reduce((acc, theme) => {
+    acc[theme] = (acc[theme] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  
+  return Object.entries(themeCount)
+    .filter(([, count]) => count > 1)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 5)
+    .map(([theme]) => theme);
+}
+
+function analyzeEmotionalJourney(fragments: TemporalFragment[]): string {
+  const emotions = fragments.flatMap(f => f.emotions);
+  const dominantEmotions = emotions.slice(0, 3);
+  
+  if (dominantEmotions.length === 0) {
+    return 'Complex emotional journey';
+  }
+  
+  return `Journey through ${dominantEmotions.join(', ')}`;
+}
+
+function analyzeThemesOverTime(fragments: any[]): any {
+  // Simple theme analysis over time
   return {
-    totalFragments: fragments.length,
-    timeSpan: {
-      earliest: earliest.toISOString(),
-      latest: latest.toISOString(),
-      duration: `${Math.round(durationYears)} years`
-    },
-    periods,
-    fragments
+    early: fragments.slice(-5).flatMap(f => f.system_themes || []).slice(0, 3),
+    recent: fragments.slice(0, 5).flatMap(f => f.system_themes || []).slice(0, 3)
   };
 }
 
-function groupFragmentsByPeriod(fragments: TemporalFragment[], period: string) {
-  // Mock implementation for period grouping
-  return [
-    {
-      name: 'Childhood (1989-1999)',
-      startDate: '1989-01-01',
-      endDate: '1999-12-31',
-      fragmentCount: fragments.filter(f => f.timeContext.lifePeriod === 'childhood').length,
-      keyThemes: ['Education', 'Family', 'Growing Up'],
-      emotionalTone: 'Wonder and Discovery'
-    },
-    {
-      name: 'Youth (2000-2009)',
-      startDate: '2000-01-01',
-      endDate: '2009-12-31',
-      fragmentCount: fragments.filter(f => f.timeContext.lifePeriod === 'youth').length,
-      keyThemes: ['Friendship', 'Achievement', 'Transition'],
-      emotionalTone: 'Excitement and Anticipation'
-    },
-    {
-      name: 'Early Adulthood (2010-2019)',
-      startDate: '2010-01-01',
-      endDate: '2019-12-31',
-      fragmentCount: fragments.filter(f => f.timeContext.lifePeriod.includes('adulthood')).length,
-      keyThemes: ['Career', 'Family', 'Responsibility'],
-      emotionalTone: 'Growth and Fulfillment'
-    }
-  ];
-}
-
-async function generateUserTimeline(supabase: any, userId: string) {
-  // Mock comprehensive timeline
+function analyzeEmotionalProgression(fragments: any[]): any {
   return {
-    userId,
-    totalLifeFragments: 156,
-    capturedTimespan: '1989-2025',
-    majorLifeEvents: [
-      { event: 'Birth', date: '1989-05-12', significance: 10 },
-      { event: 'Started School', date: '1995-09-05', significance: 8.5 },
-      { event: 'High School Graduation', date: '2007-06-15', significance: 9.2 },
-      { event: 'College Graduation', date: '2011-05-20', significance: 9.0 },
-      { event: 'First Job', date: '2011-07-01', significance: 7.8 },
-      { event: 'Marriage', date: '2015-08-14', significance: 9.8 },
-      { event: 'First Child', date: '2018-11-28', significance: 10.0 },
-      { event: 'Career Change', date: '2020-09-01', significance: 8.3 }
-    ],
-    lifePhases: {
-      childhood: { count: 23, themes: ['Wonder', 'Learning', 'Family'] },
-      youth: { count: 31, themes: ['Discovery', 'Friendship', 'Achievement'] },
-      adulthood: { count: 45, themes: ['Love', 'Career', 'Responsibility'] },
-      recent: { count: 57, themes: ['Growth', 'Reflection', 'Wisdom'] }
-    }
+    early: fragments.slice(-5).flatMap(f => f.system_emotions || []).slice(0, 3),
+    recent: fragments.slice(0, 5).flatMap(f => f.system_emotions || []).slice(0, 3)
   };
 }
 
-async function getEraOverview(supabase: any, userId: string, era: string) {
-  // Mock era-specific analysis
-  return {
-    era,
-    dominantThemes: ['Education', 'Growing Up', 'Discovery'],
-    emotionalProfile: 'Curiosity and Wonder',
-    keyMemories: 3,
-    significantRelationships: ['Parents', 'Teachers', 'Childhood Friends'],
-    majorGrowthMoments: 2,
-    challenges: ['School Anxiety', 'Social Fitting In'],
-    achievements: ['Learning to Read', 'Making Friends', 'Academic Success']
-  };
+function identifySignificantPeriods(fragments: any[]): any[] {
+  // Group by month and find periods with high activity
+  const periodActivity = fragments.reduce((acc, fragment) => {
+    const month = fragment.created_at.substring(0, 7); // YYYY-MM
+    acc[month] = (acc[month] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  
+  return Object.entries(periodActivity)
+    .filter(([, count]) => (count as number) >= 3)
+    .map(([period, count]) => ({ period, count: count as number }))
+    .slice(0, 5);
 }
 
-async function getPeriodicBreakdown(supabase: any, userId: string, period: string) {
-  // Mock periodic analysis
+function analyzeWritingPatterns(fragments: any[]): any {
+  const avgLength = fragments.reduce((sum, f) => sum + (f.body?.length || 0), 0) / fragments.length;
+  
   return {
-    period,
-    fragmentsPerPeriod: {
-      '2020': 15,
-      '2021': 12,
-      '2022': 18,
-      '2023': 22,
-      '2024': 14,
-      '2025': 8
-    },
-    seasonalPatterns: {
-      spring: { count: 20, mood: 'Optimistic' },
-      summer: { count: 25, mood: 'Energetic' },
-      autumn: { count: 22, mood: 'Reflective' },
-      winter: { count: 18, mood: 'Contemplative' }
-    }
-  };
-}
-
-async function generateTemporalInsights(supabase: any, userId: string) {
-  // Mock insights based on temporal patterns
-  return {
-    narrativeArcs: [
-      {
-        name: 'Educational Journey',
-        span: '1995-2011',
-        keyMoments: 4,
-        progression: 'Linear growth in confidence and knowledge'
-      },
-      {
-        name: 'Professional Development',
-        span: '2011-present',
-        keyMoments: 6,
-        progression: 'Evolving from uncertainty to expertise'
-      },
-      {
-        name: 'Family Formation',
-        span: '2015-present',
-        keyMoments: 3,
-        progression: 'Growing in love and responsibility'
-      }
-    ],
-    temporalPatterns: {
-      mostReflectiveMonth: 'December',
-      mostActiveMonth: 'June',
-      memoryDensity: 'Higher in formative years (16-25)',
-      emotionalEvolution: 'From external to internal focus'
-    },
-    lifeRhythms: {
-      cyclicalThemes: ['Growth', 'Challenge', 'Achievement', 'Reflection'],
-      seasonalInfluences: 'Strong autumn reflection pattern',
-      decadalShifts: 'Each decade shows increasing introspection'
-    }
+    averageLength: Math.round(avgLength),
+    mostProductivePeriod: 'Recent months', // Could be enhanced
+    preferredThemes: fragments.flatMap(f => f.system_themes || []).slice(0, 3)
   };
 }

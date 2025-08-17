@@ -1,31 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { aiAnalysisService } from '@/lib/ai/openai-service';
+import { vectorSearchService } from '@/lib/ai/vector-search';
 
 interface RecommendationRequest {
-  userId?: string;
   fragmentId?: string;
+  userId?: string;
   themes?: string[];
-  count?: number;
-  type: 'similar' | 'related' | 'discover' | 'trending';
-}
-
-interface Recommendation {
-  fragmentId: string;
-  title: string;
-  content: string;
-  author: string;
-  themes: string[];
-  similarity: number;
-  reason: string;
-  engagementScore: number;
-  createdAt: string;
+  emotions?: string[];
+  timeframe?: string;
+  type?: 'similar' | 'complementary' | 'growth' | 'wisdom';
+  limit?: number;
 }
 
 export async function POST(request: NextRequest) {
   try {
     const supabase = createClient();
     const body: RecommendationRequest = await request.json();
-    const { type, fragmentId, themes, count = 10 } = body;
+    const { fragmentId, themes, emotions, type = 'similar', limit = 5 } = body;
 
     // Get user session
     const { data: { user }, error: authError } = await supabase.auth.getUser();
@@ -33,41 +25,241 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    let recommendations: Recommendation[] = [];
+    let sourceFragment;
+    let analysisThemes = themes;
+    let analysisEmotions = emotions;
 
-    switch (type) {
-      case 'similar':
-        recommendations = await getSimilarStories(supabase, fragmentId!, count);
-        break;
-      case 'related':
-        recommendations = await getRelatedStories(supabase, themes!, count);
-        break;
-      case 'discover':
-        recommendations = await getDiscoveryRecommendations(supabase, user.id, count);
-        break;
-      case 'trending':
-        recommendations = await getTrendingStories(supabase, count);
-        break;
-      default:
-        return NextResponse.json({ error: 'Invalid recommendation type' }, { status: 400 });
+    // If fragmentId provided, fetch the fragment and its analysis
+    if (fragmentId) {
+      const { data: fragment, error: fragmentError } = await supabase
+        .from('fragment')
+        .select(`
+          id,
+          title,
+          body,
+          system_themes,
+          system_emotions,
+          user_id
+        `)
+        .eq('id', fragmentId)
+        .single();
+
+      if (fragmentError || !fragment) {
+        return NextResponse.json({ error: 'Fragment not found' }, { status: 404 });
+      }
+
+      // Check if user owns the fragment or has access
+      if (fragment.user_id !== user.id) {
+        return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+      }
+
+      sourceFragment = fragment;
+      analysisThemes = fragment.system_themes || themes;
+      analysisEmotions = fragment.system_emotions || emotions;
+
+      // If no themes/emotions in database, analyze the content
+      if (!analysisThemes?.length && !analysisEmotions?.length && fragment.body) {
+        try {
+          const analysis = await aiAnalysisService.analyzeStoryContent(
+            fragment.body,
+            fragment.title
+          );
+          analysisThemes = analysis.themes;
+          analysisEmotions = analysis.emotions;
+
+          // Update the fragment with analysis
+          await supabase
+            .from('fragment')
+            .update({
+              system_themes: analysis.themes,
+              system_emotions: analysis.emotions,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', fragmentId);
+        } catch (analysisError) {
+          console.error('Failed to analyze fragment:', analysisError);
+        }
+      }
     }
 
-    // Add personalization based on user preferences and history
-    const personalizedRecommendations = await personalizeRecommendations(
-      supabase, 
-      user.id, 
-      recommendations
-    );
+    if (!analysisThemes?.length && !analysisEmotions?.length) {
+      return NextResponse.json({ 
+        error: 'No themes or emotions provided for recommendations' 
+      }, { status: 400 });
+    }
 
-    return NextResponse.json({ 
-      recommendations: personalizedRecommendations,
-      type,
-      generatedAt: new Date().toISOString()
+    let recommendations;
+
+    // Use vector search for similar content if we have a fragment
+    if (sourceFragment?.body) {
+      try {
+        const similarFragments = await vectorSearchService.findSimilarFragments(
+          sourceFragment.body,
+          limit + 1 // +1 to exclude source fragment
+        );
+
+        // Filter out the source fragment and map to expected format
+        const filteredFragments = similarFragments
+          .filter((f: any) => f.fragment_id !== fragmentId)
+          .slice(0, limit);
+
+        recommendations = filteredFragments.map((result: any) => ({
+          id: result.fragment_id,
+          title: result.title || 'Untitled',
+          snippet: result.content?.substring(0, 200) + '...' || '',
+          similarity: result.similarity,
+          themes: result.system_themes || [],
+          emotions: result.system_emotions || [],
+          reason: `Similar content with ${Math.round(result.similarity * 100)}% similarity`,
+          type: 'vector_similarity',
+          recommendedAt: new Date().toISOString()
+        }));
+      } catch (vectorError) {
+        console.error('Vector search failed, falling back to theme-based search:', vectorError);
+        recommendations = await getThemeBasedRecommendations(
+          supabase,
+          user.id,
+          analysisThemes || [],
+          analysisEmotions || [],
+          type,
+          limit,
+          fragmentId
+        );
+      }
+    } else {
+      // Fallback to theme-based recommendations
+      recommendations = await getThemeBasedRecommendations(
+        supabase,
+        user.id,
+        analysisThemes || [],
+        analysisEmotions || [],
+        type,
+        limit,
+        fragmentId
+      );
+    }
+
+    // Generate AI insights about the recommendations
+    let aiInsights;
+    if (recommendations.length > 0) {
+      try {
+        aiInsights = await aiAnalysisService.generateRecommendations(
+          analysisThemes || [],
+          analysisEmotions || [],
+          recommendations.map((r: any) => ({ title: r.title, themes: r.themes, emotions: r.emotions }))
+        );
+      } catch (insightError) {
+        console.error('Failed to generate AI insights:', insightError);
+        aiInsights = {
+          summary: 'Recommendations based on content analysis',
+          patterns: ['Thematic similarity', 'Emotional resonance'],
+          insights: ['These stories share common themes and emotions']
+        };
+      }
+    }
+
+    return NextResponse.json({
+      recommendations,
+      sourceFragment: sourceFragment ? {
+        id: sourceFragment.id,
+        title: sourceFragment.title,
+        themes: analysisThemes,
+        emotions: analysisEmotions
+      } : null,
+      aiInsights,
+      metadata: {
+        type,
+        totalRecommendations: recommendations.length,
+        generatedAt: new Date().toISOString(),
+        method: sourceFragment?.body ? 'vector_search' : 'theme_based'
+      }
     });
   } catch (error) {
-    console.error('Error in recommendations API:', error);
+    console.error('Error generating recommendations:', error);
+    
+    if (error instanceof Error) {
+      if (error.message.includes('OpenAI')) {
+        return NextResponse.json({ 
+          error: 'AI service temporarily unavailable',
+          details: 'Please try again later'
+        }, { status: 503 });
+      }
+    }
+    
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
+}
+
+async function getThemeBasedRecommendations(
+  supabase: any,
+  userId: string,
+  themes: string[],
+  emotions: string[],
+  type: string,
+  limit: number,
+  excludeFragmentId?: string
+) {
+  // Build query for theme-based recommendations
+  let query = supabase
+    .from('fragment')
+    .select(`
+      id,
+      title,
+      body,
+      system_themes,
+      system_emotions,
+      created_at
+    `)
+    .eq('user_id', userId);
+
+  if (excludeFragmentId) {
+    query = query.neq('id', excludeFragmentId);
+  }
+
+  const { data: fragments, error } = await query.limit(50); // Get more to filter
+
+  if (error || !fragments) {
+    return [];
+  }
+
+  // Score fragments based on theme and emotion overlap
+  const scoredFragments = fragments
+    .map((fragment: any) => {
+      const fragmentThemes = fragment.system_themes || [];
+      const fragmentEmotions = fragment.system_emotions || [];
+      
+      const themeOverlap = themes.filter(theme => 
+        fragmentThemes.some((ft: string) => ft.toLowerCase().includes(theme.toLowerCase()))
+      ).length;
+      
+      const emotionOverlap = emotions.filter(emotion => 
+        fragmentEmotions.some((fe: string) => fe.toLowerCase().includes(emotion.toLowerCase()))
+      ).length;
+
+      const score = (themeOverlap * 2 + emotionOverlap) / (themes.length + emotions.length);
+
+      return {
+        ...fragment,
+        score,
+        themeOverlap,
+        emotionOverlap
+      };
+    })
+    .filter((fragment: any) => fragment.score > 0)
+    .sort((a: any, b: any) => b.score - a.score)
+    .slice(0, limit);
+
+  return scoredFragments.map((fragment: any) => ({
+    id: fragment.id,
+    title: fragment.title,
+    snippet: fragment.body?.substring(0, 200) + '...',
+    similarity: fragment.score,
+    themes: fragment.system_themes || [],
+    emotions: fragment.system_emotions || [],
+    reason: `${fragment.themeOverlap} shared themes, ${fragment.emotionOverlap} shared emotions`,
+    type: 'theme_based',
+    recommendedAt: new Date().toISOString()
+  }));
 }
 
 export async function GET(request: NextRequest) {
@@ -82,22 +274,67 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Get user's recommendation history and preferences
-    const userProfile = await getUserRecommendationProfile(supabase, user.id);
+    // Get user's recent fragments for general recommendations
+    const { data: recentFragments, error: fragmentsError } = await supabase
+      .from('fragment')
+      .select(`
+        id,
+        title,
+        body,
+        system_themes,
+        system_emotions,
+        created_at
+      `)
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    if (fragmentsError || !recentFragments?.length) {
+      return NextResponse.json({
+        recommendations: [],
+        message: 'No fragments found for recommendations'
+      });
+    }
+
+    // Analyze user's content patterns
+    const allThemes = recentFragments.flatMap(f => f.system_themes || []);
+    const allEmotions = recentFragments.flatMap(f => f.system_emotions || []);
     
-    // Generate comprehensive recommendations
-    const [similar, discover, trending] = await Promise.all([
-      getSimilarStories(supabase, userProfile.lastReadFragment, 5),
-      getDiscoveryRecommendations(supabase, user.id, 5),
-      getTrendingStories(supabase, 5)
-    ]);
+    const themeFrequency = allThemes.reduce((acc, theme) => {
+      acc[theme] = (acc[theme] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+
+    const emotionFrequency = allEmotions.reduce((acc, emotion) => {
+      acc[emotion] = (acc[emotion] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+
+    const topThemes = Object.entries(themeFrequency)
+      .sort(([,a], [,b]) => b - a)
+      .slice(0, 5)
+      .map(([theme]) => theme);
+
+    const topEmotions = Object.entries(emotionFrequency)
+      .sort(([,a], [,b]) => b - a)
+      .slice(0, 5)
+      .map(([emotion]) => emotion);
 
     return NextResponse.json({
-      profile: userProfile,
-      recommendations: {
-        similar,
-        discover,
-        trending
+      userPatterns: {
+        topThemes,
+        topEmotions,
+        totalFragments: recentFragments.length,
+        analysisAvailable: recentFragments.filter(f => f.system_themes?.length || f.system_emotions?.length).length
+      },
+      suggestions: {
+        exploreThemes: topThemes.slice(0, 3),
+        exploreEmotions: topEmotions.slice(0, 3),
+        writingPrompts: [
+          `Write about a time when you experienced ${topEmotions[0] || 'joy'}`,
+          `Explore your relationship with ${topThemes[0] || 'family'}`,
+          `Reflect on how you've grown in the area of ${topThemes[1] || 'personal development'}`
+        ]
       },
       generatedAt: new Date().toISOString()
     });
@@ -105,189 +342,4 @@ export async function GET(request: NextRequest) {
     console.error('Error getting user recommendations:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
-}
-
-async function getSimilarStories(
-  supabase: any, 
-  fragmentId: string, 
-  count: number
-): Promise<Recommendation[]> {
-  // In production, this would use vector similarity search
-  // For now, we'll simulate with mock data
-  
-  const mockRecommendations: Recommendation[] = [
-    {
-      fragmentId: 'frag_001',
-      title: 'Finding Strength in Adversity',
-      content: 'A story about overcoming life\'s greatest challenges...',
-      author: 'Sarah Chen',
-      themes: ['Resilience', 'Personal Growth', 'Hope'],
-      similarity: 0.92,
-      reason: 'Similar themes of resilience and personal transformation',
-      engagementScore: 4.7,
-      createdAt: '2025-08-15T10:30:00Z'
-    },
-    {
-      fragmentId: 'frag_002',
-      title: 'The Journey Home',
-      content: 'Reflections on family, belonging, and identity...',
-      author: 'Maria Rodriguez',
-      themes: ['Family', 'Identity', 'Belonging'],
-      similarity: 0.87,
-      reason: 'Shared emotional journey and family dynamics',
-      engagementScore: 4.5,
-      createdAt: '2025-08-14T15:45:00Z'
-    },
-    {
-      fragmentId: 'frag_003',
-      title: 'Lessons from My Grandmother',
-      content: 'Wisdom passed down through generations...',
-      author: 'James Wilson',
-      themes: ['Wisdom', 'Family', 'Tradition'],
-      similarity: 0.84,
-      reason: 'Similar storytelling style and generational insights',
-      engagementScore: 4.8,
-      createdAt: '2025-08-13T09:20:00Z'
-    }
-  ];
-
-  return mockRecommendations.slice(0, count);
-}
-
-async function getRelatedStories(
-  supabase: any, 
-  themes: string[], 
-  count: number
-): Promise<Recommendation[]> {
-  // Mock implementation - in production, query by themes
-  const mockRecommendations: Recommendation[] = [
-    {
-      fragmentId: 'frag_004',
-      title: 'Breaking Free from Fear',
-      content: 'How I learned to embrace uncertainty and take risks...',
-      author: 'Alex Thompson',
-      themes: ['Courage', 'Growth', 'Fear'],
-      similarity: 0.89,
-      reason: `Related to your interest in: ${themes.join(', ')}`,
-      engagementScore: 4.6,
-      createdAt: '2025-08-16T11:15:00Z'
-    },
-    {
-      fragmentId: 'frag_005',
-      title: 'The Art of Letting Go',
-      content: 'Finding peace through acceptance and release...',
-      author: 'Linda Park',
-      themes: ['Healing', 'Acceptance', 'Peace'],
-      similarity: 0.86,
-      reason: `Explores similar themes: ${themes.slice(0, 2).join(', ')}`,
-      engagementScore: 4.4,
-      createdAt: '2025-08-12T14:30:00Z'
-    }
-  ];
-
-  return mockRecommendations.slice(0, count);
-}
-
-async function getDiscoveryRecommendations(
-  supabase: any, 
-  userId: string, 
-  count: number
-): Promise<Recommendation[]> {
-  // Mock implementation - in production, analyze user patterns
-  const mockRecommendations: Recommendation[] = [
-    {
-      fragmentId: 'frag_006',
-      title: 'Dancing with Uncertainty',
-      content: 'Learning to find joy in the unknown...',
-      author: 'Rachel Kim',
-      themes: ['Adventure', 'Uncertainty', 'Joy'],
-      similarity: 0.75,
-      reason: 'Discover new perspectives outside your usual reading',
-      engagementScore: 4.3,
-      createdAt: '2025-08-17T08:45:00Z'
-    },
-    {
-      fragmentId: 'frag_007',
-      title: 'The Language of Dreams',
-      content: 'How dreams shaped my understanding of creativity...',
-      author: 'David Martinez',
-      themes: ['Creativity', 'Dreams', 'Inspiration'],
-      similarity: 0.72,
-      reason: 'Expand your horizons with creative storytelling',
-      engagementScore: 4.1,
-      createdAt: '2025-08-11T16:20:00Z'
-    }
-  ];
-
-  return mockRecommendations.slice(0, count);
-}
-
-async function getTrendingStories(
-  supabase: any, 
-  count: number
-): Promise<Recommendation[]> {
-  // Mock implementation - in production, analyze engagement metrics
-  const mockRecommendations: Recommendation[] = [
-    {
-      fragmentId: 'frag_008',
-      title: 'The Digital Detox Experiment',
-      content: 'What I learned from 30 days without social media...',
-      author: 'Emily Zhang',
-      themes: ['Technology', 'Mindfulness', 'Modern Life'],
-      similarity: 0.68,
-      reason: 'Trending: High engagement from the community',
-      engagementScore: 4.9,
-      createdAt: '2025-08-16T20:10:00Z'
-    },
-    {
-      fragmentId: 'frag_009',
-      title: 'Building Bridges Across Generations',
-      content: 'Connecting with my teenage daughter in the digital age...',
-      author: 'Michael Brown',
-      themes: ['Parenting', 'Generation Gap', 'Communication'],
-      similarity: 0.71,
-      reason: 'Popular: Resonating with many parents today',
-      engagementScore: 4.7,
-      createdAt: '2025-08-15T12:55:00Z'
-    }
-  ];
-
-  return mockRecommendations.slice(0, count);
-}
-
-async function personalizeRecommendations(
-  supabase: any,
-  userId: string,
-  recommendations: Recommendation[]
-): Promise<Recommendation[]> {
-  // Mock personalization - in production, use ML model
-  // Adjust scores based on user preferences, reading history, etc.
-  
-  return recommendations.map(rec => ({
-    ...rec,
-    // Add small random personalization boost
-    similarity: Math.min(1, rec.similarity + (Math.random() * 0.1 - 0.05)),
-    reason: `${rec.reason} • Personalized for you`
-  })).sort((a, b) => b.similarity - a.similarity);
-}
-
-async function getUserRecommendationProfile(supabase: any, userId: string) {
-  // Mock user profile - in production, analyze user behavior
-  return {
-    userId,
-    preferredThemes: ['Personal Growth', 'Family', 'Resilience'],
-    readingPatterns: {
-      timeOfDay: 'evening',
-      avgReadTime: '8 minutes',
-      preferredLength: 'medium'
-    },
-    engagementHistory: {
-      totalReads: 45,
-      avgRating: 4.3,
-      favoriteAuthors: ['Sarah Chen', 'Maria Rodriguez']
-    },
-    lastReadFragment: 'frag_recent_001',
-    recommendationAccuracy: 0.78,
-    lastUpdated: new Date().toISOString()
-  };
 }
