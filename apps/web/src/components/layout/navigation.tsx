@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Brain, Home, Search, User, PlusCircle, Users, BarChart3 } from 'lucide-react';
+import { Brain, Home, Search, User, PlusCircle, Users, BarChart3, TrendingUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const navigation = [
   { name: 'Home', href: '/', icon: Home },
   { name: 'Browse', href: '/fragments', icon: Search },
   { name: 'Create', href: '/create', icon: PlusCircle },
+  { name: 'Insights', href: '/insights', icon: TrendingUp },
   { name: 'Community', href: '/community', icon: Users },
   { name: 'AI Insights', href: '/ai', icon: Brain },
   { name: 'Analytics', href: '/admin', icon: BarChart3 },
