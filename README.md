@@ -525,14 +525,6 @@ npm run lint
 ## 📄 License
 
 This project is licensed under the MIT License.
-
-## 🔗 Links
-
-- [Documentation](./docs/)
-- [API Reference](./docs/api.md)
-- [Privacy Policy](./docs/privacy.md)
-- [Support](mailto:support@llhe.app)
-
 ---
 
 Built by Mark Mikile Mutunga with ❤️ for preserving and connecting human experiences.
