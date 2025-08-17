@@ -491,4 +491,4 @@ The codebase follows enterprise-grade patterns with comprehensive error handling
 
 ---
 
-**Built with ❤️ using modern web technologies and AI-first principles.**
+**Built by Mark Mikile Mutunga with ❤️ using modern web technologies and AI-first principles.**
