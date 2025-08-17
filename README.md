@@ -535,4 +535,4 @@ This project is licensed under the MIT License.
 
 ---
 
-Built with ❤️ for preserving and connecting human experiences.
+Built by Mark Mikile Mutunga with ❤️ for preserving and connecting human experiences.

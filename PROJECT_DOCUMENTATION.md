@@ -50,6 +50,18 @@ Media Upload:
 
 Background Processing:
 └── POST /api/links/recompute/[fragmentId] (Recompute fragment links)
+
+Advanced Search (Phase 5B):
+├── POST /api/search/advanced (Multi-method search with clustering)
+├── GET /api/search/advanced?action=suggestions (AI-powered suggestions)
+├── GET /api/search/advanced?action=filters (Available filter options)
+└── GET /api/search/advanced?action=analytics (Search analytics)
+
+Insights & Analytics (Phase 5B):
+├── GET /api/insights?type=full (Comprehensive analysis)
+├── GET /api/insights?type=patterns (Pattern analysis)
+├── GET /api/insights?type=growth (Growth insights)
+└── GET /api/insights?type=relationships (Relationship mapping)
 ```
 
 #### **4. AI Services (Pluggable Architecture)**
@@ -58,6 +70,9 @@ Services Implemented:
 ├── Embedding Service (OpenAI text-embedding-3-large + local fallback)
 ├── Classification Service (Emotion/theme detection + PII detection)
 ├── Transcription Service (Whisper API + local fallback)
+├── Advanced Search Service (Multi-method search with clustering)
+├── Insights Analyzer (ML-powered pattern detection)
+├── Vector Search Service (Semantic similarity with pgvector)
 └── Factory Pattern for service switching (OpenAI/local)
 ```
 
@@ -67,9 +82,13 @@ UI Components:
 ├── Authentication forms (Magic link login)
 ├── Fragment creation form with media upload
 ├── Fragment detail view with connections
-├── Search interface with filters
+├── Advanced search interface with filters and suggestions
+├── Search result clustering and visualization
+├── Personal insights dashboard with interactive charts
+├── ML-powered analytics and pattern detection
+├── Timeline visualizations and emotional journey mapping
 ├── Fragment cards and lists
-└── Responsive layout with shadcn/ui
+└── Responsive layout with shadcn/ui + Recharts
 ```
 
 #### **6. Security & Privacy**
